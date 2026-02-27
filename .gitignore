@@ -1,0 +1,18 @@
+# Large data directories
+processed_data_500hz/
+wECG_dataset_npy/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Log files
+*.txt
+!requirements.txt
+
+# Misc
+.DS_Store
+*.swp
+*.swo
+.autodl/
