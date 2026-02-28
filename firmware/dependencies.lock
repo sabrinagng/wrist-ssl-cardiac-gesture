@@ -1,0 +1,21 @@
+dependencies:
+  franzbischoff/max32664-hub:
+    component_hash: c24ac857e2d2eaaaf7459a7659bb4f2e88140ebfc1657a8886cc0266411fee9b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.9.5
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+direct_dependencies:
+- franzbischoff/max32664-hub
+- idf
+manifest_hash: e4e3531ba317393fb570516edb7bd9946b31c6b44449915830eeb7ff98900bae
+target: esp32s3
+version: 2.0.0
