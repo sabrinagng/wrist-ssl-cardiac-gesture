@@ -27,7 +27,7 @@ wrist-ssl-cardiac-gesture/
 ├── emg_related/                  # Gesture recognition pipelines
 │   ├── DSP_based/
 │   │   ├── lda_rf_svm_train.py       # SVM / RF / LDA on TF features (STFT, CWT, LogMel)
-│   │   ├── resnet_emg.py             # Mini-ResNet (1D raw + 2D TF modes)
+│   │   ├── resnet_emg.py             # 2D ResNet on TF representations
 │   │   └── train_2dcnn.py            # Vanilla 2D CNN on spectrograms
 │   └── README.md
 │
@@ -68,7 +68,7 @@ The stimulus program guides participants through **10 repetitions** of **10 hand
 | Subjects | 20 (S01–S20, excluding S06/S09) |
 | Gestures | 9 dynamic + 1 static rest |
 | Repetitions | 10 per session |
-| Sampling | ECG/EMG @ 2 kHz, IMU @ 1 kHz, PPG @ 200 Hz |
+| Sampling | ECG/EMG @ 2 kHz|
 | Session duration | ~80 min |
 
 See [`stimulus/README.md`](stimulus/README.md) for the full experimental protocol.
@@ -116,12 +116,12 @@ Time-frequency representations (STFT, CWT, Log-Mel) flattened and classified wit
 
 ```bash
 python emg_related/DSP_based/lda_rf_svm_train.py \
-    --window 16s --transform stft --clf svm --pca-dim 256
+    --window 10s --transform stft --clf svm --pca-dim 128
 ```
 
 ### Deep Learning
 
-- **Mini-ResNet** — 1D (raw time-series) and 2D (spectrogram) modes with optional stacked features (RMS, MAV, WL, PSD)
+- **2D ResNet** — Lightweight ResNet on spectrograms with optional stacked features (RMS, MAV, WL, PSD)
 - **Vanilla 2D CNN** — 4-layer ConvNet on spectrograms with optional multi-fold CV and data augmentation
 
 Both support cross-subject and intra-subject evaluation modes.

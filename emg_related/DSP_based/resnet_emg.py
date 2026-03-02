@@ -1,35 +1,28 @@
 """
-EMG-Only Gesture Classification - Mini-ResNet
-==============================================
-Single-branch Mini-ResNet on 2-channel EMG raw signal data.
+EMG-Only Gesture Classification - 2D ResNet
+============================================
+2D ResNet on 2-channel EMG time-frequency representations.
 
 Supports two evaluation modes:
     --eval-mode cross   : Cross-subject (S01-S16 train, S17-S20 test) [default]
     --eval-mode intra   : Intra-subject (per-subject stratified 80/20 split)
 
-Supports three architecture modes:
-    --mode 1d   : 1D Mini-ResNet (Conv1d directly on raw time-series)
-    --mode 2d   : 2D Mini-ResNet (Conv2d on time-frequency representation)
-    --mode both : Run both 1d and 2d
-
-Supports three time-frequency transforms for 2D mode:
+Supports three time-frequency transforms:
     --transform stft    : Short-Time Fourier Transform [default]
     --transform cwt     : Continuous Wavelet Transform (Morlet, GPU-accelerated)
     --transform logmel  : Log-Mel Spectrogram (mel-scaled frequency axis)
 
-Stack features (2D mode only, appended to frequency axis):
+Stack features (appended to frequency axis):
     --stack rms         : Append RMS envelope
     --stack rms,mav     : Append RMS + MAV
     --stack rms,mav,wl  : Append RMS + MAV + Waveform Length
     --stack rms,mav,wl,psd : Append all four (RMS + MAV + WL + PSD)
 
 Usage:
-    python train_resnet18_emg_only.py --window 2s --mode 2d --transform cwt --stack rms,mav
-    python train_resnet18_emg_only.py --window 16s --mode 2d --transform cwt --stack rms,mav,wl
-    python train_resnet18_emg_only.py --window 2s --mode 1d --eval-mode intra
-    python train_resnet18_emg_only.py --window all --mode both --eval-mode cross
-
-Date: February 2026
+    python resnet_emg.py --window 2s --transform cwt --stack rms,mav
+    python resnet_emg.py --window 16s --transform cwt --stack rms,mav,wl
+    python resnet_emg.py --window 2s --eval-mode intra
+    python resnet_emg.py --window all --eval-mode cross
 """
 
 import gc
@@ -266,7 +259,7 @@ class EMGDataset(Dataset):
         return x
 
 
-# ==================== Stack Feature Layer (2D mode) ====================
+# ==================== Stack Feature Layer ====================
 
 class StackFeatureLayer(nn.Module):
     """Compute time-domain envelope features and append to frequency axis.
@@ -327,70 +320,6 @@ class StackFeatureLayer(nn.Module):
         stack = torch.log1p(stack)
 
         return stack
-
-
-# ==================== 1D Mini-ResNet ====================
-
-class BasicBlock1d(nn.Module):
-    expansion = 1
-    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, 7, stride=stride, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, 7, stride=1, padding=3, bias=False)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        self.downsample = downsample
-
-    def forward(self, x):
-        identity = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        return F.relu(out + identity)
-
-
-class ResNet1d(nn.Module):
-    def __init__(self, in_channels, num_blocks=(1, 1, 1, 1)):
-        super().__init__()
-        self.in_channels_current = 16
-        self.conv1 = nn.Conv1d(in_channels, 16, 15, stride=2, padding=7, bias=False)
-        self.bn1 = nn.BatchNorm1d(16)
-        self.maxpool = nn.MaxPool1d(3, stride=2, padding=1)
-        self.layer1 = self._make_layer(16, num_blocks[0], 1)
-        self.layer2 = self._make_layer(32, num_blocks[1], 2)
-        self.layer3 = self._make_layer(64, num_blocks[2], 2)
-        self.layer4 = self._make_layer(128, num_blocks[3], 2)
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-
-    def _make_layer(self, out_ch, n, stride):
-        ds = None
-        if stride != 1 or self.in_channels_current != out_ch:
-            ds = nn.Sequential(
-                nn.Conv1d(self.in_channels_current, out_ch, 1, stride=stride, bias=False),
-                nn.BatchNorm1d(out_ch))
-        layers = [BasicBlock1d(self.in_channels_current, out_ch, stride, ds)]
-        self.in_channels_current = out_ch
-        for _ in range(1, n):
-            layers.append(BasicBlock1d(out_ch, out_ch))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.maxpool(F.relu(self.bn1(self.conv1(x))))
-        x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
-        return self.avgpool(x).squeeze(-1)
-
-
-class EMGResNet1d(nn.Module):
-    def __init__(self, emg_channels=2, num_classes=9, dropout=0.3):
-        super().__init__()
-        self.backbone = ResNet1d(in_channels=emg_channels)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(128), nn.Linear(128, 64), nn.ReLU(),
-            nn.Dropout(dropout), nn.Linear(64, num_classes))
-
-    def forward(self, emg):
-        return self.classifier(self.backbone(emg))
 
 
 # ==================== Time-Frequency Transforms ====================
@@ -824,23 +753,18 @@ def save_training_log(log_dir, config, results):
 
 # ==================== Build model ====================
 
-def build_model(mode, transform_type, emg_channels, num_classes, dropout, device,
+def build_model(transform_type, emg_channels, num_classes, dropout, device,
                 stack_list=None):
-    if mode == "1d":
-        if stack_list:
-            print("  [!] Stack features not supported for 1D mode, ignoring --stack")
-        return EMGResNet1d(emg_channels, num_classes, dropout).to(device)
-    else:
-        return EMGResNet2d(emg_channels, num_classes, dropout, transform_type,
-                           n_fft=256, hop_length=64, n_scales=128,
-                           f_min=20.0, f_max=450.0, fs=FS_EMG, n_mels=128,
-                           stack_list=stack_list).to(device)
+    return EMGResNet2d(emg_channels, num_classes, dropout, transform_type,
+                       n_fft=256, hop_length=64, n_scales=128,
+                       f_min=20.0, f_max=450.0, fs=FS_EMG, n_mels=128,
+                       stack_list=stack_list).to(device)
 
 
 # ==================== Cross-Subject Run ====================
 
 def run_cross_subject(
-    mode, transform_type, window_label,
+    transform_type, window_label,
     train_loader, val_loader, test_loader,
     n_train, n_val, n_test,
     y_test_shifted, subj_test,
@@ -848,11 +772,8 @@ def run_cross_subject(
     num_classes, unique_labels, idx_to_label,
     args, device, base_log_dir, stack_list,
 ):
-    if mode == "1d":
-        mode_str = "MiniResNet-1D"
-    else:
-        mode_str = f"MiniResNet-2D-{transform_type.upper()}"
-    if stack_list and mode == "2d":
+    mode_str = f"ResNet2D-{transform_type.upper()}"
+    if stack_list:
         mode_str += f"+{','.join(stack_list).upper()}"
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -864,9 +785,9 @@ def run_cross_subject(
     sys.stdout = tee
 
     print(f"\n{'='*70}")
-    print(f"EMG-Only {mode_str} Classification (cross-subject)")
+    print(f"EMG {mode_str} Classification (cross-subject)")
     print(f"{'='*70}")
-    print(f"Window: {window_label}, Mode: {mode}, Transform: {transform_type}")
+    print(f"Window: {window_label}, Transform: {transform_type}")
     if stack_list:
         print(f"Stack features: {stack_list}")
     print(f"Train: {n_train}, Val: {n_val}, Test: {n_test}")
@@ -875,7 +796,7 @@ def run_cross_subject(
     print(f"Device: {device}, AMP: {use_amp}")
     print(f"{'='*70}")
 
-    model = build_model(mode, transform_type, emg_channels, num_classes,
+    model = build_model(transform_type, emg_channels, num_classes,
                         args.dropout, device, stack_list)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -983,7 +904,7 @@ def run_cross_subject(
                               title=f"{mode_str} Per-Subject ({window_label}) - {test_acc*100:.1f}%")
 
     save_training_log(log_dir, {
-        "model": mode_str, "mode": mode, "transform": transform_type,
+        "model": mode_str, "transform": transform_type,
         "stack": stack_list if stack_list else "none", "eval_mode": "cross",
         "window_size": window_label, "train": n_train, "val": n_val, "test": n_test,
         "num_classes": int(num_classes), "total_params": total_params,
@@ -999,7 +920,7 @@ def run_cross_subject(
     if torch.cuda.is_available(): torch.cuda.empty_cache()
     sys.stdout = original_stdout; tee.close()
 
-    return {"window": window_label, "mode": mode, "transform": transform_type,
+    return {"window": window_label, "transform": transform_type,
             "stack": ','.join(stack_list) if stack_list else "none",
             "eval_mode": "cross", "test_acc": test_acc * 100,
             "best_val_acc": best_val_acc * 100, "log_dir": log_dir}
@@ -1007,14 +928,11 @@ def run_cross_subject(
 
 # ==================== Intra-Subject Run ====================
 
-def run_intra_subject(mode, transform_type, window_label,
+def run_intra_subject(transform_type, window_label,
                       data_dir, label_dir, subjects,
                       args, device, base_log_dir, stack_list):
-    if mode == "1d":
-        mode_str = "MiniResNet-1D"
-    else:
-        mode_str = f"MiniResNet-2D-{transform_type.upper()}"
-    if stack_list and mode == "2d":
+    mode_str = f"ResNet2D-{transform_type.upper()}"
+    if stack_list:
         mode_str += f"+{','.join(stack_list).upper()}"
 
     n_folds = args.n_folds
@@ -1029,9 +947,9 @@ def run_intra_subject(mode, transform_type, window_label,
 
     print(f"\n{'='*70}")
     if use_kfold:
-        print(f"EMG-Only {mode_str} Intra-Subject ({n_folds}-Fold CV)")
+        print(f"EMG {mode_str} Intra-Subject ({n_folds}-Fold CV)")
     else:
-        print(f"EMG-Only {mode_str} Intra-Subject")
+        print(f"EMG {mode_str} Intra-Subject")
     print(f"{'='*70}")
     print(f"Window: {window_label}, Subjects: {', '.join(subjects)}")
     if stack_list:
@@ -1120,7 +1038,7 @@ def run_intra_subject(mode, transform_type, window_label,
                 batch_size=args.batch_size, shuffle=False,
                 num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
 
-            model = build_model(mode, transform_type, emg_channels, num_classes,
+            model = build_model(transform_type, emg_channels, num_classes,
                                 args.dropout, device, stack_list)
             total_params = sum(p.numel() for p in model.parameters())
 
@@ -1322,7 +1240,7 @@ def run_intra_subject(mode, transform_type, window_label,
             title=f"All Subjects{cv_str} ({window_label}) - {global_acc:.1f}%")
 
     save_training_log(log_dir, {
-        "model": mode_str, "mode": mode, "transform": transform_type,
+        "model": mode_str, "transform": transform_type,
         "stack": stack_list if stack_list else "none", "eval_mode": "intra",
         "window_size": window_label, "subjects": subjects,
         "n_folds": n_folds, "total_params": total_params,
@@ -1335,7 +1253,7 @@ def run_intra_subject(mode, transform_type, window_label,
 
     sys.stdout = original_stdout; tee.close()
 
-    return {"window": window_label, "mode": mode, "transform": transform_type,
+    return {"window": window_label, "transform": transform_type,
             "stack": ','.join(stack_list) if stack_list else "none",
             "eval_mode": "intra", "test_acc": mean_acc, "std_acc": std_acc,
             "log_dir": log_dir, "per_subject": subject_results}
@@ -1348,12 +1266,11 @@ ALL_WINDOWS = ["2s", "4s", "6s", "8s", "10s", "12s", "14s", "16s"]
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    parser = argparse.ArgumentParser(description='EMG-Only Mini-ResNet')
+    parser = argparse.ArgumentParser(description='EMG-Only 2D ResNet')
     parser.add_argument("--window", "-w", default="2s")
-    parser.add_argument("--mode", "-m", default="1d", choices=["1d", "2d", "both"])
     parser.add_argument("--transform", "-t", default="stft", choices=["stft", "cwt", "logmel"])
     parser.add_argument("--stack", "-s", default="none",
-                        help="Stack features for 2D mode: none, rms, mav, wl, psd, or comma-separated")
+                        help="Stack features: none, rms, mav, wl, psd, or comma-separated")
     parser.add_argument("--eval-mode", "-e", default="cross", choices=["cross", "intra"])
     parser.add_argument("--subjects", default=None)
     parser.add_argument("--train", default="S01-S16")
@@ -1393,7 +1310,6 @@ def main():
 
     window_sizes = ALL_WINDOWS if args.window.lower() == "all" else \
                    [w.strip() for w in args.window.split(",")] if "," in args.window else [args.window]
-    modes = ["1d", "2d"] if args.mode == "both" else [args.mode]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def parse_range(s):
@@ -1411,93 +1327,90 @@ def main():
 
     eval_str = "intra-subject" if args.eval_mode == "intra" else "cross-subject"
     print(f"\n{'='*70}")
-    print(f"EMG-Only Mini-ResNet | {eval_str}")
-    print(f"Windows: {', '.join(window_sizes)}, Modes: {', '.join(modes)}")
-    print(f"Transform (2D): {args.transform.upper()}")
+    print(f"EMG 2D ResNet | {eval_str}")
+    print(f"Windows: {', '.join(window_sizes)}")
+    print(f"Transform: {args.transform.upper()}")
     if stack_list:
         print(f"Stack features: {stack_list}")
     print(f"Device: {device}")
     print(f"{'='*70}")
 
     all_results = []
-    run_idx = 0
-    total_runs = len(window_sizes) * len(modes)
+    total_runs = len(window_sizes)
 
-    for window_label in window_sizes:
+    for run_idx, window_label in enumerate(window_sizes, 1):
         windowed_dir = os.path.join(script_dir, "windowed_data", window_label)
         data_dir = os.path.join(windowed_dir, "data")
         label_dir = os.path.join(windowed_dir, "label")
 
-        for mode in modes:
-            run_idx += 1
-            print(f"\n>>> Run {run_idx}/{total_runs}: {window_label}, {mode}, {args.eval_mode}")
+        print(f"\n>>> Run {run_idx}/{total_runs}: {window_label}, {args.eval_mode}")
 
-            if args.eval_mode == "intra":
-                result = run_intra_subject(mode, args.transform, window_label,
-                                           data_dir, label_dir, all_subjects,
-                                           args, device, args.log_dir, stack_list)
-                if result:
-                    all_results.append(result)
-                    print(f"    -> Mean: {result['test_acc']:.1f}% ± {result['std_acc']:.1f}%")
-            else:
-                print(f"\n[{window_label}] Loading data...")
-                train_emg_all, y_train_all, _, _ = load_raw_windowed_data(
-                    data_dir, label_dir, train_subjs)
-                test_emg, y_test, subj_test, _ = load_raw_windowed_data(
-                    data_dir, label_dir, test_subjs)
+        if args.eval_mode == "intra":
+            result = run_intra_subject(args.transform, window_label,
+                                       data_dir, label_dir, all_subjects,
+                                       args, device, args.log_dir, stack_list)
+            if result:
+                all_results.append(result)
+                print(f"    -> Mean: {result['test_acc']:.1f}% ± {result['std_acc']:.1f}%")
+        else:
+            print(f"\n[{window_label}] Loading data...")
+            train_emg_all, y_train_all, _, _ = load_raw_windowed_data(
+                data_dir, label_dir, train_subjs)
+            test_emg, y_test, subj_test, _ = load_raw_windowed_data(
+                data_dir, label_dir, test_subjs)
 
-                if len(train_emg_all) == 0 or len(test_emg) == 0:
-                    print("  ERROR: No data"); continue
+            if len(train_emg_all) == 0 or len(test_emg) == 0:
+                print("  ERROR: No data"); continue
 
-                unique_labels = sorted(set(y_train_all) | set(y_test))
-                label_to_idx = {lab: idx for idx, lab in enumerate(unique_labels)}
-                idx_to_label = {idx: lab for lab, idx in label_to_idx.items()}
-                y_train_mapped = np.array([label_to_idx[l] for l in y_train_all])
-                y_test_shifted = np.array([label_to_idx[l] for l in y_test])
-                num_classes = len(unique_labels)
+            unique_labels = sorted(set(y_train_all) | set(y_test))
+            label_to_idx = {lab: idx for idx, lab in enumerate(unique_labels)}
+            idx_to_label = {idx: lab for lab, idx in label_to_idx.items()}
+            y_train_mapped = np.array([label_to_idx[l] for l in y_train_all])
+            y_test_shifted = np.array([label_to_idx[l] for l in y_test])
+            num_classes = len(unique_labels)
 
-                # Stratified val split
-                train_idx, val_idx = train_test_split(
-                    np.arange(len(train_emg_all)), test_size=args.val_split,
-                    stratify=y_train_mapped, random_state=42)
+            # Stratified val split
+            train_idx, val_idx = train_test_split(
+                np.arange(len(train_emg_all)), test_size=args.val_split,
+                stratify=y_train_mapped, random_state=42)
 
-                y_train = y_train_mapped[train_idx]
-                y_val = y_train_mapped[val_idx]
-                print(f"  Stratified val split: train={len(train_idx)}, val={len(val_idx)}")
-                print(f"  Train classes: {np.bincount(y_train)}")
-                print(f"  Val   classes: {np.bincount(y_val)}")
+            y_train = y_train_mapped[train_idx]
+            y_val = y_train_mapped[val_idx]
+            print(f"  Stratified val split: train={len(train_idx)}, val={len(val_idx)}")
+            print(f"  Train classes: {np.bincount(y_train)}")
+            print(f"  Val   classes: {np.bincount(y_val)}")
 
-                nw = args.num_workers
-                train_loader = DataLoader(
-                    EMGDataset([train_emg_all[i] for i in train_idx], y_train,
-                               augment=args.augment, noise_std=args.noise_std),
-                    batch_size=args.batch_size, shuffle=True,
-                    num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
-                val_loader = DataLoader(
-                    EMGDataset([train_emg_all[i] for i in val_idx], y_val),
-                    batch_size=args.batch_size, shuffle=False,
-                    num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
-                test_loader = DataLoader(
-                    EMGDataset(test_emg, y_test_shifted),
-                    batch_size=args.batch_size, shuffle=False,
-                    num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
+            nw = args.num_workers
+            train_loader = DataLoader(
+                EMGDataset([train_emg_all[i] for i in train_idx], y_train,
+                           augment=args.augment, noise_std=args.noise_std),
+                batch_size=args.batch_size, shuffle=True,
+                num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
+            val_loader = DataLoader(
+                EMGDataset([train_emg_all[i] for i in val_idx], y_val),
+                batch_size=args.batch_size, shuffle=False,
+                num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
+            test_loader = DataLoader(
+                EMGDataset(test_emg, y_test_shifted),
+                batch_size=args.batch_size, shuffle=False,
+                num_workers=nw, pin_memory=True, persistent_workers=nw > 0)
 
-                result = run_cross_subject(
-                    mode, args.transform, window_label,
-                    train_loader, val_loader, test_loader,
-                    len(train_idx), len(val_idx), len(test_emg),
-                    y_test_shifted, subj_test,
-                    train_emg_all[0].shape[1], train_emg_all[0].shape[0],
-                    num_classes, unique_labels, idx_to_label,
-                    args, device, args.log_dir, stack_list)
+            result = run_cross_subject(
+                args.transform, window_label,
+                train_loader, val_loader, test_loader,
+                len(train_idx), len(val_idx), len(test_emg),
+                y_test_shifted, subj_test,
+                train_emg_all[0].shape[1], train_emg_all[0].shape[0],
+                num_classes, unique_labels, idx_to_label,
+                args, device, args.log_dir, stack_list)
 
-                if result:
-                    all_results.append(result)
-                    print(f"    -> Test: {result['test_acc']:.1f}%")
+            if result:
+                all_results.append(result)
+                print(f"    -> Test: {result['test_acc']:.1f}%")
 
-                del train_emg_all, test_emg
-                gc.collect()
-                if torch.cuda.is_available(): torch.cuda.empty_cache()
+            del train_emg_all, test_emg
+            gc.collect()
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
 
     # Final summary
     print(f"\n{'='*70}")
@@ -1507,10 +1420,10 @@ def main():
         tf = f" ({r['transform'].upper()})" if r.get('transform', 'n/a') != 'n/a' else ""
         st = f" +{r['stack']}" if r.get('stack', 'none') != 'none' else ""
         if r['eval_mode'] == 'intra':
-            print(f"  {r['window']} {r['mode']}{tf}{st} intra -> "
+            print(f"  {r['window']}{tf}{st} intra -> "
                   f"{r['test_acc']:.1f}% ± {r['std_acc']:.1f}%")
         else:
-            print(f"  {r['window']} {r['mode']}{tf}{st} cross -> {r['test_acc']:.1f}%")
+            print(f"  {r['window']}{tf}{st} cross -> {r['test_acc']:.1f}%")
     print(f"{'='*70}")
 
     summary_path = os.path.join(args.log_dir, "batch_summary.json")
