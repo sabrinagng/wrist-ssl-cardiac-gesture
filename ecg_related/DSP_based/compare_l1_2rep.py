@@ -3,16 +3,6 @@ Wrist vs Chest ECG Comparison — Ablation-Aligned Edition
 =========================================================
 Compare wrist ECG against chest ECG (ground truth) using 10s sliding windows.
 
-Produces:
-  1. Original per-subject tables (HR, HRV, R-Peak)
-  2. Ablation-aligned metrics split by condition:
-       - Free Form:    REST windows (including Static gesture)
-       - Gesture:      gesture windows (gesture_id 1-10)
-     Metrics:
-       HR  — MAE±STD, RMSE, L1<2, L1<5, L1<10%×ref
-       HRV — RMSSD MAE±STD, SDNN MAE±STD
-  3. LaTeX tables for paper
-
 Usage:
     python compare_l1_2rep.py -d ./processed_500hz -o ./comparison_results
     python compare_l1_2rep.py -d ./processed_500hz -o ./comparison_results -m neurokit --tolerance 50
@@ -49,9 +39,6 @@ STRIDE_SEC = 1.0
 # Label settings
 STATIC_GESTURE_ID = 0
 RATIO_THRESHOLD = 0.5
-
-# R-peak matching tolerance (ms)
-RPEAK_TOLERANCE_MS = 50
 
 # HRV range-based tolerance
 HRV_RANGE_TOLERANCE = 0.05
@@ -242,33 +229,6 @@ def compute_window_metrics(rpeaks: np.ndarray, is_valid: np.ndarray, rr_ms: np.n
     }
 
 
-# ============== R-Peak Matching ==============
-
-def match_rpeaks(chest_rpeaks: np.ndarray, wrist_rpeaks: np.ndarray,
-                 fs: int, tolerance_ms: float = 50.0) -> dict:
-    tolerance_samples = int(tolerance_ms / 1000.0 * fs)
-    chest_matched = np.zeros(len(chest_rpeaks), dtype=bool)
-    wrist_matched = np.zeros(len(wrist_rpeaks), dtype=bool)
-
-    for i, wp in enumerate(wrist_rpeaks):
-        if len(chest_rpeaks) == 0:
-            break
-        diffs = np.abs(chest_rpeaks.astype(np.int64) - int(wp))
-        min_idx = np.argmin(diffs)
-        if diffs[min_idx] <= tolerance_samples:
-            if not chest_matched[min_idx]:
-                wrist_matched[i] = True
-                chest_matched[min_idx] = True
-
-    tp = int(np.sum(wrist_matched))
-    fp = int(np.sum(~wrist_matched))
-    fn = int(np.sum(~chest_matched))
-    se = tp / (tp + fn) * 100 if (tp + fn) > 0 else 0.0
-    ppv = tp / (tp + fp) * 100 if (tp + fp) > 0 else 0.0
-    f1 = 2 * se * ppv / (se + ppv) if (se + ppv) > 0 else 0.0
-    return {'tp': tp, 'fp': fp, 'fn': fn, 'se': se, 'ppv': ppv, 'f1': f1}
-
-
 # ============== Main Processing ==============
 
 def process_subject_rep(ecg_chest: np.ndarray, ecg_wrist: np.ndarray, fs: int,
@@ -310,20 +270,14 @@ def process_subject_rep(ecg_chest: np.ndarray, ecg_wrist: np.ndarray, fs: int,
             'comparable': chest_m['is_valid'] and wrist_m['n_rr'] >= 2
         })
 
-    rpeak_match = match_rpeaks(rpeaks_chest, rpeaks_wrist, fs, RPEAK_TOLERANCE_MS) if has_wrist else {
-        'tp': 0, 'fp': 0, 'fn': len(rpeaks_chest), 'se': 0, 'ppv': 0, 'f1': 0
-    }
-
     return {
         'window_pairs': window_pairs,
-        'rpeak_match': rpeak_match,
         'n_chest_peaks': len(rpeaks_chest),
         'n_wrist_peaks': len(rpeaks_wrist) if has_wrist else 0
     }
 
 
 # ============== Condition Classification ==============
-# STEADY_STATE removed — Static gesture is now FREE_FORM
 
 def classify_condition(window: dict) -> str:
     if window['label'] == 'GESTURE':
@@ -421,19 +375,10 @@ def aggregate_subject(all_rep_results: List[dict]) -> dict:
             return {'mae': np.mean(np.abs(err)), 'r': r, 'n': len(chest_vals)}
         return {'mae': np.nan, 'r': np.nan, 'n': len(chest_vals)}
 
-    total_tp = sum(r['rpeak_match']['tp'] for r in all_rep_results)
-    total_fp = sum(r['rpeak_match']['fp'] for r in all_rep_results)
-    total_fn = sum(r['rpeak_match']['fn'] for r in all_rep_results)
-    se = total_tp / (total_tp + total_fn) * 100 if (total_tp + total_fn) > 0 else 0
-    ppv = total_tp / (total_tp + total_fp) * 100 if (total_tp + total_fp) > 0 else 0
-    f1 = 2 * se * ppv / (se + ppv) if (se + ppv) > 0 else 0
-
     return {
         'hr': hr_metrics,
         'sdnn': compute_comparison(sdnn_chest, sdnn_wrist),
         'rmssd': compute_comparison(rmssd_chest, rmssd_wrist),
-        'rpeak': {'tp': total_tp, 'fp': total_fp, 'fn': total_fn,
-                  'se': se, 'ppv': ppv, 'f1': f1}
     }
 
 
@@ -484,30 +429,6 @@ def save_hrv_table(results: dict, output_path: str):
         def fmt_ms(vals): return f"{np.mean(vals):.2f} ± {np.std(vals):.2f}" if vals else '-'
         writer.writerow(['Mean ± SD', fmt_ms(all_sm), fmt_ms(all_sr),
                          fmt_ms(all_rm), fmt_ms(all_rr)])
-
-
-def save_rpeak_table(results: dict, output_path: str):
-    subjects = sorted(results.keys())
-    with open(output_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Subject', 'TP', 'FP', 'FN', 'Se (%)', 'P+ (%)', 'F1 (%)'])
-        all_se, all_ppv, all_f1 = [], [], []
-        total_tp, total_fp, total_fn = 0, 0, 0
-        for s in subjects:
-            rp = results[s]['rpeak']
-            writer.writerow([s, rp['tp'], rp['fp'], rp['fn'],
-                             f"{rp['se']:.1f}", f"{rp['ppv']:.1f}", f"{rp['f1']:.1f}"])
-            all_se.append(rp['se']); all_ppv.append(rp['ppv']); all_f1.append(rp['f1'])
-            total_tp += rp['tp']; total_fp += rp['fp']; total_fn += rp['fn']
-        writer.writerow(['Mean ± SD', '-', '-', '-',
-                         f"{np.mean(all_se):.1f} ± {np.std(all_se):.1f}",
-                         f"{np.mean(all_ppv):.1f} ± {np.std(all_ppv):.1f}",
-                         f"{np.mean(all_f1):.1f} ± {np.std(all_f1):.1f}"])
-        tse = total_tp / (total_tp + total_fn) * 100 if (total_tp + total_fn) > 0 else 0
-        tppv = total_tp / (total_tp + total_fp) * 100 if (total_tp + total_fp) > 0 else 0
-        tf1 = 2 * tse * tppv / (tse + tppv) if (tse + tppv) > 0 else 0
-        writer.writerow(['Total', total_tp, total_fp, total_fn,
-                         f"{tse:.1f}", f"{tppv:.1f}", f"{tf1:.1f}"])
 
 
 def save_ablation_aligned_csv(condition_results: dict, output_path: str, method_label: str = 'NeuroKit'):
@@ -607,7 +528,7 @@ def save_window_detail_csv(all_window_data: dict, output_path: str):
 
 def generate_latex_tables(results: dict, condition_results: dict, output_path: str,
                           method: str = 'neurokit', gt_method: str = 'neurokit'):
-    """Generate LaTeX — Table 2 format only."""
+    """Generate LaTeX — Table 1 (per-subject HR) and Table 2 (ablation by condition)."""
     subjects = sorted(results.keys())
 
     method_names = {
@@ -687,39 +608,6 @@ def generate_latex_tables(results: dict, condition_results: dict, output_path: s
                 f"(10s windows). HR thresholds in bpm; "
                 f"RMSSD and SDNN reported as MAE (ms).}}\n")
         f.write("\\label{tab:baseline_ablation}\n\\end{table*}\n\n")
-
-        # ===== Table 3: R-Peak Detection =====
-        f.write("% ===== Table 3: R-Peak Detection Accuracy =====\n")
-        f.write("\\begin{table}[htbp]\n\\centering\n")
-        f.write("\\resizebox{\\columnwidth}{!}{\n")
-        f.write("\\begin{tabular}{lcccccc}\n\\toprule\n")
-        f.write("\\textbf{Subject} & \\textbf{TP} & \\textbf{FP} & \\textbf{FN} & "
-                "\\textbf{Se (\\%)} & \\textbf{P+ (\\%)} & \\textbf{F1 (\\%)} \\\\\n")
-        f.write("\\midrule\n")
-
-        all_se, all_ppv, all_f1 = [], [], []
-        total_tp, total_fp, total_fn = 0, 0, 0
-        for s in subjects:
-            rp = results[s]['rpeak']
-            f.write(f"{s} & {rp['tp']} & {rp['fp']} & {rp['fn']} & "
-                    f"{rp['se']:.1f} & {rp['ppv']:.1f} & {rp['f1']:.1f} \\\\\n")
-            all_se.append(rp['se']); all_ppv.append(rp['ppv']); all_f1.append(rp['f1'])
-            total_tp += rp['tp']; total_fp += rp['fp']; total_fn += rp['fn']
-
-        f.write("\\midrule\n")
-        f.write(f"\\textbf{{Mean $\\pm$ SD}} & -- & -- & -- & "
-                f"${np.mean(all_se):.1f} \\pm {np.std(all_se):.1f}$ & "
-                f"${np.mean(all_ppv):.1f} \\pm {np.std(all_ppv):.1f}$ & "
-                f"${np.mean(all_f1):.1f} \\pm {np.std(all_f1):.1f}$ \\\\\n")
-        tse = total_tp / (total_tp + total_fn) * 100 if (total_tp + total_fn) > 0 else 0
-        tppv = total_tp / (total_tp + total_fp) * 100 if (total_tp + total_fp) > 0 else 0
-        tf1 = 2 * tse * tppv / (tse + tppv) if (tse + tppv) > 0 else 0
-        f.write(f"\\textbf{{Total}} & {total_tp} & {total_fp} & {total_fn} & "
-                f"{tse:.1f} & {tppv:.1f} & {tf1:.1f} \\\\\n")
-        f.write("\\bottomrule\n\\end{tabular}}\n")
-        f.write(f"\\caption{{R-Peak Detection Accuracy ({int(RPEAK_TOLERANCE_MS)}ms tolerance, "
-                f"Wrist [{wrist_name}] vs.\\ Chest [{gt_name}])}}\n")
-        f.write("\\label{tab:rpeak_accuracy}\n\\end{table}\n\n")
 
 
 # ============== Single-Method Processing ==============
@@ -1029,8 +917,6 @@ def main():
     parser.add_argument('--gt-method', default=None,
                         choices=['pantompkins1985', 'kalidas2017', 'neurokit'],
                         help='R-peak detection method for CHEST ECG ground truth (default: same as -m)')
-    parser.add_argument('--tolerance', type=float, default=50.0,
-                        help='R-peak matching tolerance in ms (default: 50)')
     parser.add_argument('-t', '--threshold', type=float, default=2.5,
                         help='RR quality threshold multiplier (default: 2.5)')
     parser.add_argument('-w', '--window-size', type=float, default=10.0,
@@ -1048,11 +934,10 @@ def main():
     if args.gt_method is None:
         args.gt_method = args.method
 
-    global THRESHOLD_MULTIPLIER, WINDOW_SIZE_SEC, STRIDE_SEC, RPEAK_TOLERANCE_MS
+    global THRESHOLD_MULTIPLIER, WINDOW_SIZE_SEC, STRIDE_SEC
     THRESHOLD_MULTIPLIER = args.threshold
     WINDOW_SIZE_SEC = args.window_size
     STRIDE_SEC = args.stride
-    RPEAK_TOLERANCE_MS = args.tolerance
 
     excluded = set(args.excluded_subjects.split(',')) if args.excluded_subjects else set()
 
@@ -1074,7 +959,6 @@ def main():
     print(f"Chest GT method: {args.gt_method}")
     print(f"Window:          {WINDOW_SIZE_SEC}s, Stride: {STRIDE_SEC}s")
     print(f"RR threshold:    {THRESHOLD_MULTIPLIER}x")
-    print(f"R-peak tolerance:{RPEAK_TOLERANCE_MS}ms")
     print(f"Subjects:        {len(subjects)}")
     print(f"Excluded:        {sorted(excluded) if excluded else 'none'}")
     print(f"Conditions:      Free Form, Gesture (no Steady State)")
@@ -1118,7 +1002,6 @@ def main():
             if all_results_m:
                 save_hr_table(all_results_m, os.path.join(method_dir, 'hr_accuracy.csv'))
                 save_hrv_table(all_results_m, os.path.join(method_dir, 'hrv_accuracy.csv'))
-                save_rpeak_table(all_results_m, os.path.join(method_dir, 'rpeak_accuracy.csv'))
                 save_window_detail_csv(all_window_data_m, os.path.join(method_dir, 'window_comparison_detail.csv'))
                 save_ablation_aligned_csv(cond_results_m, os.path.join(method_dir, 'ablation_aligned_baseline.csv'),
                                           method_label=method_label)
@@ -1169,7 +1052,6 @@ def main():
 
     save_hr_table(all_results, os.path.join(args.output, 'hr_accuracy.csv'))
     save_hrv_table(all_results, os.path.join(args.output, 'hrv_accuracy.csv'))
-    save_rpeak_table(all_results, os.path.join(args.output, 'rpeak_accuracy.csv'))
     save_window_detail_csv(all_window_data, os.path.join(args.output, 'window_comparison_detail.csv'))
     save_ablation_aligned_csv(condition_results, os.path.join(args.output, 'ablation_aligned_baseline.csv'),
                               method_label=method_label)
