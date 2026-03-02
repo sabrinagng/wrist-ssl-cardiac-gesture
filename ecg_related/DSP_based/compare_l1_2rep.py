@@ -3,9 +3,17 @@ Wrist vs Chest ECG Comparison — Ablation-Aligned Edition
 =========================================================
 Compare wrist ECG against chest ECG (ground truth) using 10s sliding windows.
 
+Produces:
+  1. Original per-subject tables (HR, HRV)
+  2. Ablation-aligned metrics split by condition:
+       - Free Form:    REST windows (including Static gesture)
+       - Gesture:      gesture windows (gesture_id 1-10)
+     Metrics:
+       HR  — MAE±STD, RMSE, L1<2, L1<5, L1<10%×ref
+       HRV — RMSSD MAE±STD, SDNN MAE±STD
+
 Usage:
     python compare_l1_2rep.py -d ./processed_500hz -o ./comparison_results
-    python compare_l1_2rep.py -d ./processed_500hz -o ./comparison_results -m neurokit --tolerance 50
     python compare_l1_2rep.py -d ./processed_500hz -o ./results_pt -m pantompkins1985 --gt-method neurokit --test-reps-only
 """
 
@@ -360,20 +368,17 @@ def aggregate_subject(all_rep_results: List[dict]) -> dict:
         hr_metrics = {
             'mae': np.mean(np.abs(hr_err)),
             'rmse': np.sqrt(np.mean(hr_err ** 2)),
-            'r': np.corrcoef(hr_chest, hr_wrist)[0, 1] if np.std(hr_chest) > 0 and np.std(hr_wrist) > 0 else np.nan,
-            'bias': np.mean(hr_err),
             'n_windows': len(hr_chest)
         }
     else:
-        hr_metrics = {'mae': np.nan, 'rmse': np.nan, 'r': np.nan, 'bias': np.nan, 'n_windows': len(hr_chest)}
+        hr_metrics = {'mae': np.nan, 'rmse': np.nan, 'n_windows': len(hr_chest)}
 
     def compute_comparison(chest_vals, wrist_vals):
         chest_vals, wrist_vals = np.array(chest_vals), np.array(wrist_vals)
         if len(chest_vals) >= 3:
             err = wrist_vals - chest_vals
-            r = np.corrcoef(chest_vals, wrist_vals)[0, 1] if np.std(chest_vals) > 0 and np.std(wrist_vals) > 0 else np.nan
-            return {'mae': np.mean(np.abs(err)), 'r': r, 'n': len(chest_vals)}
-        return {'mae': np.nan, 'r': np.nan, 'n': len(chest_vals)}
+            return {'mae': np.mean(np.abs(err)), 'n': len(chest_vals)}
+        return {'mae': np.nan, 'n': len(chest_vals)}
 
     return {
         'hr': hr_metrics,
@@ -388,26 +393,21 @@ def save_hr_table(results: dict, output_path: str):
     subjects = sorted(results.keys())
     with open(output_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Subject', 'N_Windows', 'MAE (bpm)', 'RMSE (bpm)', 'r', 'Bias (bpm)'])
-        all_mae, all_rmse, all_r, all_bias = [], [], [], []
+        writer.writerow(['Subject', 'N_Windows', 'MAE (bpm)', 'RMSE (bpm)'])
+        all_mae, all_rmse = [], []
         for s in subjects:
             hr = results[s]['hr']
             writer.writerow([
                 s, hr['n_windows'],
                 f"{hr['mae']:.2f}" if not np.isnan(hr['mae']) else '-',
                 f"{hr['rmse']:.2f}" if not np.isnan(hr['rmse']) else '-',
-                f"{hr['r']:.2f}" if not np.isnan(hr['r']) else '-',
-                f"{hr['bias']:+.2f}" if not np.isnan(hr['bias']) else '-'
             ])
             if not np.isnan(hr['mae']):
                 all_mae.append(hr['mae']); all_rmse.append(hr['rmse'])
-                all_r.append(hr['r']); all_bias.append(hr['bias'])
         writer.writerow([
             'Mean ± SD', '',
             f"{np.mean(all_mae):.2f} ± {np.std(all_mae):.2f}",
             f"{np.mean(all_rmse):.2f} ± {np.std(all_rmse):.2f}",
-            f"{np.mean(all_r):.2f} ± {np.std(all_r):.2f}",
-            f"{np.mean(all_bias):.2f} ± {np.std(all_bias):.2f}"
         ])
 
 
@@ -415,20 +415,16 @@ def save_hrv_table(results: dict, output_path: str):
     subjects = sorted(results.keys())
     with open(output_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Subject', 'SDNN MAE (ms)', 'SDNN r',
-                         'RMSSD MAE (ms)', 'RMSSD r'])
-        all_sm, all_sr, all_rm, all_rr = [], [], [], []
+        writer.writerow(['Subject', 'SDNN MAE (ms)', 'RMSSD MAE (ms)'])
+        all_sm, all_rm = [], []
         for s in subjects:
             sdnn = results[s]['sdnn']; rmssd = results[s]['rmssd']
             def fmt(v): return f"{v:.2f}" if not np.isnan(v) else '-'
-            writer.writerow([s, fmt(sdnn['mae']), fmt(sdnn['r']),
-                             fmt(rmssd['mae']), fmt(rmssd['r'])])
-            for v, lst in [(sdnn['mae'], all_sm), (sdnn['r'], all_sr),
-                           (rmssd['mae'], all_rm), (rmssd['r'], all_rr)]:
-                if not np.isnan(v): lst.append(v)
+            writer.writerow([s, fmt(sdnn['mae']), fmt(rmssd['mae'])])
+            if not np.isnan(sdnn['mae']): all_sm.append(sdnn['mae'])
+            if not np.isnan(rmssd['mae']): all_rm.append(rmssd['mae'])
         def fmt_ms(vals): return f"{np.mean(vals):.2f} ± {np.std(vals):.2f}" if vals else '-'
-        writer.writerow(['Mean ± SD', fmt_ms(all_sm), fmt_ms(all_sr),
-                         fmt_ms(all_rm), fmt_ms(all_rr)])
+        writer.writerow(['Mean ± SD', fmt_ms(all_sm), fmt_ms(all_rm)])
 
 
 def save_ablation_aligned_csv(condition_results: dict, output_path: str, method_label: str = 'NeuroKit'):
@@ -525,89 +521,6 @@ def save_window_detail_csv(all_window_data: dict, output_path: str):
                         fmt(hr_err), fmt(sdnn_err), fmt(rmssd_err)
                     ])
 
-
-def generate_latex_tables(results: dict, condition_results: dict, output_path: str,
-                          method: str = 'neurokit', gt_method: str = 'neurokit'):
-    """Generate LaTeX — Table 1 (per-subject HR) and Table 2 (ablation by condition)."""
-    subjects = sorted(results.keys())
-
-    method_names = {
-        'pantompkins1985': 'Pan-Tompkins',
-        'kalidas2017': 'Kalidas',
-        'neurokit': 'NeuroKit'
-    }
-    wrist_name = method_names.get(method, method)
-    gt_name = method_names.get(gt_method, gt_method)
-
-    with open(output_path, 'w') as f:
-        # ===== Table 1: Per-subject HR =====
-        f.write("% ===== Table 1: Heart Rate Estimation Accuracy (Per Subject) =====\n")
-        f.write(f"% Wrist method: {method} | Chest GT method: {gt_method}\n")
-        f.write("\\begin{table}[htbp]\n\\centering\n")
-        f.write("\\resizebox{\\columnwidth}{!}{\n")
-        f.write("\\begin{tabular}{lrcccc}\n\\toprule\n")
-        f.write("\\textbf{Subject} & \\textbf{N} & \\textbf{MAE (bpm)} & "
-                "\\textbf{RMSE (bpm)} & \\textbf{r} & \\textbf{Bias (bpm)} \\\\\n")
-        f.write("\\midrule\n")
-
-        all_mae, all_rmse, all_r, all_bias = [], [], [], []
-        for s in subjects:
-            hr = results[s]['hr']
-            n = hr['n_windows']
-            def fmt(v, plus=False):
-                if np.isnan(v): return '--'
-                return f"{v:+.2f}" if plus else f"{v:.2f}"
-            f.write(f"{s} & {n} & {fmt(hr['mae'])} & {fmt(hr['rmse'])} & "
-                    f"{fmt(hr['r'])} & {fmt(hr['bias'], True)} \\\\\n")
-            if not np.isnan(hr['mae']):
-                all_mae.append(hr['mae']); all_rmse.append(hr['rmse'])
-                all_r.append(hr['r']); all_bias.append(hr['bias'])
-
-        f.write("\\midrule\n")
-        f.write(f"\\textbf{{Mean $\\pm$ SD}} & & "
-                f"${np.mean(all_mae):.2f} \\pm {np.std(all_mae):.2f}$ & "
-                f"${np.mean(all_rmse):.2f} \\pm {np.std(all_rmse):.2f}$ & "
-                f"${np.mean(all_r):.2f} \\pm {np.std(all_r):.2f}$ & "
-                f"${np.mean(all_bias):.2f} \\pm {np.std(all_bias):.2f}$ \\\\\n")
-        f.write("\\bottomrule\n\\end{tabular}\n}\n")
-        f.write(f"\\caption{{Heart Rate Estimation Accuracy (Wrist [{wrist_name}] vs.\\ "
-                f"Chest [{gt_name}], 10s Windows)}}\n")
-        f.write("\\label{tab:hr_accuracy}\n\\end{table}\n\n")
-
-        # ===== Table 2: Ablation by condition (THE main table) =====
-        f.write("% ===== Table 2: Ablation-Aligned Metrics by Condition =====\n")
-        f.write("\\begin{table*}[htbp]\n\\centering\n")
-        f.write("\\resizebox{\\textwidth}{!}{\n")
-        f.write("\\begin{tabular}{ll rrr rrr rr}\n\\toprule\n")
-        f.write("& & \\multicolumn{6}{c}{\\textbf{Heart Rate Metrics}} "
-                "& \\multicolumn{2}{c}{\\textbf{HRV Metrics}} \\\\\n")
-        f.write("\\cmidrule(lr){3-8} \\cmidrule(lr){9-10}\n")
-        f.write("\\textbf{Method} & \\textbf{Dataset} & "
-                "\\textbf{MAE} & \\textbf{STD} & \\textbf{RMSE} & "
-                "\\textbf{$L_1<2$} & \\textbf{$L_1<5$} & \\textbf{$L_1<10\\%$} & "
-                "\\textbf{RMSSD} & \\textbf{SDNN} \\\\\n")
-        f.write("\\midrule\n")
-
-        for i, dk in enumerate(CONDITIONS):
-            label = wrist_name if i == 0 else ''
-            if dk in condition_results and condition_results[dk] is not None:
-                r = condition_results[dk]
-                f.write(f"{label} & {CONDITION_LABELS[dk]} & "
-                        f"{r['hr_mae']:.2f} & {r['hr_std']:.2f} & {r['hr_rmse']:.2f} & "
-                        f"{r['hr_l1_lt2']*100:.1f}\\% & "
-                        f"{r['hr_l1_lt5']*100:.1f}\\% & "
-                        f"{r['hr_l1_lt10p']*100:.1f}\\% & "
-                        f"{r['rmssd_mae']:.2f} & {r['sdnn_mae']:.2f} \\\\\n")
-            else:
-                f.write(f"{label} & {CONDITION_LABELS[dk]} & "
-                        f"-- & -- & -- & -- & -- & -- & -- & -- \\\\\n")
-
-        f.write("\\bottomrule\n\\end{tabular}}\n")
-        f.write(f"\\caption{{Signal Processing Baseline: {wrist_name} wrist ECG vs.\\ "
-                f"{gt_name} chest ECG by condition "
-                f"(10s windows). HR thresholds in bpm; "
-                f"RMSSD and SDNN reported as MAE (ms).}}\n")
-        f.write("\\label{tab:baseline_ablation}\n\\end{table*}\n\n")
 
 
 # ============== Single-Method Processing ==============
@@ -812,94 +725,6 @@ def save_multi_method_csv(agg: dict, per_method_results: dict, output_path: str)
             ])
 
 
-def generate_multi_method_latex(agg: dict, per_method_results: dict,
-                                output_path: str, gt_method: str = 'neurokit'):
-    """Generate LaTeX Table 2 for multi-method results."""
-    methods = list(per_method_results.keys())
-    gt_name = METHOD_NAMES.get(gt_method, gt_method)
-
-    with open(output_path, 'w') as f:
-        # ===== Per-method Table 2 =====
-        f.write("% ===== Per-Method Results (Table 2 format) =====\n")
-        f.write("\\begin{table*}[htbp]\n\\centering\n")
-        f.write("\\resizebox{\\textwidth}{!}{\n")
-        f.write("\\begin{tabular}{ll rrr rrr rr}\n\\toprule\n")
-        f.write("& & \\multicolumn{6}{c}{\\textbf{Heart Rate Metrics}} "
-                "& \\multicolumn{2}{c}{\\textbf{HRV Metrics}} \\\\\n")
-        f.write("\\cmidrule(lr){3-8} \\cmidrule(lr){9-10}\n")
-        f.write("\\textbf{Method} & \\textbf{Dataset} & "
-                "\\textbf{MAE} & \\textbf{STD} & \\textbf{RMSE} & "
-                "\\textbf{$L_1<2$} & \\textbf{$L_1<5$} & \\textbf{$L_1<10\\%$ target} & "
-                "\\textbf{RMSSD} & \\textbf{SDNN} \\\\\n")
-        f.write("\\midrule\n")
-
-        for m in methods:
-            m_name = METHOD_NAMES.get(m, m)
-            for i, dk in enumerate(CONDITIONS):
-                r = per_method_results[m].get(dk)
-                label = m_name if i == 0 else ''
-                if r is not None:
-                    f.write(f"{label} & {CONDITION_LABELS[dk]} & "
-                            f"{r['hr_mae']:.2f} & {r['hr_std']:.2f} & {r['hr_rmse']:.2f} & "
-                            f"{r['hr_l1_lt2']*100:.1f}\\% & "
-                            f"{r['hr_l1_lt5']*100:.1f}\\% & "
-                            f"{r['hr_l1_lt10p']*100:.1f}\\% & "
-                            f"{r['rmssd_mae']:.2f} & {r['sdnn_mae']:.2f} \\\\\n")
-                else:
-                    f.write(f"{label} & {CONDITION_LABELS[dk]} & "
-                            f"-- & -- & -- & -- & -- & -- & -- & -- \\\\\n")
-            if m != methods[-1]:
-                f.write("\\midrule\n")
-
-        f.write("\\bottomrule\n\\end{tabular}}\n")
-        f.write(f"\\caption{{Per-Method R-Peak Detection Results: Wrist ECG vs.\\ "
-                f"Chest [{gt_name}] (10s windows). "
-                f"RMSSD and SDNN reported as MAE (ms).}}\n")
-        f.write("\\label{tab:per_method_ablation}\n\\end{table*}\n\n")
-
-        # ===== Aggregated Table 2 =====
-        f.write("% ===== Aggregated Multi-Method Results =====\n")
-        f.write("\\begin{table*}[htbp]\n\\centering\n")
-        f.write("\\resizebox{\\textwidth}{!}{\n")
-        f.write("\\begin{tabular}{ll rrr rrr rr}\n\\toprule\n")
-        f.write("& & \\multicolumn{6}{c}{\\textbf{Heart Rate Metrics}} "
-                "& \\multicolumn{2}{c}{\\textbf{HRV Metrics}} \\\\\n")
-        f.write("\\cmidrule(lr){3-8} \\cmidrule(lr){9-10}\n")
-        f.write("\\textbf{Method} & \\textbf{Dataset} & "
-                "\\textbf{MAE} & \\textbf{STD} & \\textbf{RMSE} & "
-                "\\textbf{$L_1<2$} & \\textbf{$L_1<5$} & \\textbf{$L_1<10\\%$ target} & "
-                "\\textbf{RMSSD} & \\textbf{SDNN} \\\\\n")
-        f.write("\\midrule\n")
-
-        def fmt_ms_latex(key, agg_cond):
-            v = agg_cond[key]
-            if np.isnan(v['mean']): return '--'
-            return f"${v['mean']:.2f} \\pm {v['std']:.2f}$"
-
-        def fmt_pct_latex(key, agg_cond):
-            v = agg_cond[key]
-            if np.isnan(v['mean']): return '--'
-            return f"${v['mean']*100:.1f} \\pm {v['std']*100:.1f}$\\%"
-
-        for i, dk in enumerate(CONDITIONS):
-            a = agg[dk]
-            label = f"Mean$\\pm$STD" if i == 0 else ''
-            f.write(f"{label} & {CONDITION_LABELS[dk]} & "
-                    f"{fmt_ms_latex('hr_mae', a)} & "
-                    f"{fmt_ms_latex('hr_std', a)} & "
-                    f"{fmt_ms_latex('hr_rmse', a)} & "
-                    f"{fmt_pct_latex('hr_l1_lt2', a)} & "
-                    f"{fmt_pct_latex('hr_l1_lt5', a)} & "
-                    f"{fmt_pct_latex('hr_l1_lt10p', a)} & "
-                    f"{fmt_ms_latex('rmssd_mae', a)} & "
-                    f"{fmt_ms_latex('sdnn_mae', a)} \\\\\n")
-
-        f.write("\\bottomrule\n\\end{tabular}}\n")
-        f.write(f"\\caption{{Signal Processing Baseline (mean $\\pm$ std across "
-                f"{len(methods)} R-peak methods): Wrist ECG vs.\\ Chest [{gt_name}] "
-                f"by condition (10s windows). RMSSD and SDNN reported as MAE (ms).}}\n")
-        f.write("\\label{tab:multi_method_ablation}\n\\end{table*}\n")
-
 
 # ============== Main ==============
 
@@ -1005,9 +830,6 @@ def main():
                 save_window_detail_csv(all_window_data_m, os.path.join(method_dir, 'window_comparison_detail.csv'))
                 save_ablation_aligned_csv(cond_results_m, os.path.join(method_dir, 'ablation_aligned_baseline.csv'),
                                           method_label=method_label)
-                generate_latex_tables(all_results_m, cond_results_m,
-                                      os.path.join(method_dir, 'latex_tables.tex'),
-                                      method=wrist_method, gt_method=args.gt_method)
 
             print_ablation_summary(cond_results_m, wrist_method, args.gt_method,
                                    reps_label='8-10 only' if args.test_reps_only else 'all')
@@ -1019,9 +841,6 @@ def main():
 
         save_multi_method_csv(agg, per_method_condition_results,
                               os.path.join(args.output, 'multi_method_aggregated.csv'))
-        generate_multi_method_latex(agg, per_method_condition_results,
-                                    os.path.join(args.output, 'multi_method_latex_tables.tex'),
-                                    gt_method=args.gt_method)
 
         print(f"\nOutput saved to: {args.output}/")
         return
@@ -1055,25 +874,20 @@ def main():
     save_window_detail_csv(all_window_data, os.path.join(args.output, 'window_comparison_detail.csv'))
     save_ablation_aligned_csv(condition_results, os.path.join(args.output, 'ablation_aligned_baseline.csv'),
                               method_label=method_label)
-    generate_latex_tables(all_results, condition_results,
-                          os.path.join(args.output, 'latex_tables.tex'),
-                          method=args.method, gt_method=args.gt_method)
 
     # Print summary
     print("\n" + "=" * 70)
     print(f"HR ACCURACY (Wrist [{args.method}] vs Chest [{args.gt_method}]) — Per Subject")
     print("=" * 70)
-    print(f"{'Subject':<8} {'N':>6} {'MAE':>10} {'RMSE':>10} {'r':>8} {'Bias':>10}")
-    print("-" * 55)
-    all_mae, all_r = [], []
+    print(f"{'Subject':<8} {'N':>6} {'MAE':>10} {'RMSE':>10}")
+    print("-" * 40)
+    all_mae = []
     for s in sorted(all_results.keys()):
         hr = all_results[s]['hr']
-        print(f"{s:<8} {hr['n_windows']:>6} {hr['mae']:>10.2f} {hr['rmse']:>10.2f} "
-              f"{hr['r']:>8.2f} {hr['bias']:>+10.2f}")
-        all_mae.append(hr['mae']); all_r.append(hr['r'])
-    print("-" * 55)
-    print(f"{'Mean±SD':<8} {'':>6} {np.mean(all_mae):>7.2f}±{np.std(all_mae):<5.2f} "
-          f"{'':>10} {np.mean(all_r):>5.2f}±{np.std(all_r):<5.2f}")
+        print(f"{s:<8} {hr['n_windows']:>6} {hr['mae']:>10.2f} {hr['rmse']:>10.2f}")
+        all_mae.append(hr['mae'])
+    print("-" * 40)
+    print(f"{'Mean±SD':<8} {'':>6} {np.mean(all_mae):>7.2f}±{np.std(all_mae):<5.2f}")
 
     print_ablation_summary(condition_results, args.method, args.gt_method,
                            reps_label='8-10 only' if args.test_reps_only else 'all')

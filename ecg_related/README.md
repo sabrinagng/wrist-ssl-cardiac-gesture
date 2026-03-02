@@ -39,7 +39,7 @@ pip install torch torchvision torchaudio
 pip install neurokit2 wfdb numpy scipy scikit-learn tqdm
 ```
 
-**Tested with:** Python 3.10+, PyTorch 2.x, CUDA 11.8+
+**Tested with:** Python 3.13.9, PyTorch 2.11.0, CUDA 12.8
 
 ---
 
@@ -126,11 +126,10 @@ python compare_l1_2rep.py \
 
 | File | Description |
 |------|-------------|
-| `hr_accuracy.csv` | Per-subject HR: MAE, RMSE, r, Bias |
-| `hrv_accuracy.csv` | Per-subject HRV: SDNN/RMSSD MAE and r |
-| `ablation_aligned_baseline.csv` | Condition-split metrics (Free Form / Gesture) |
+| `hr_accuracy.csv` | Per-subject HR: MAE, RMSE|
+| `hrv_accuracy.csv` | Per-subject HRV: SDNN/RMSSD MAE|
+| `ablation_aligned_baseline.csv` | Condition-split metrics (Free Form / Gesture), same as the SSL-based output |
 | `window_comparison_detail.csv` | Every window with chest/wrist metrics and errors |
-| `latex_tables.tex` | Publication-ready LaTeX tables |
 | `multi_method_aggregated.csv` | Mean ± STD across all 3 R-peak methods (if `--all-methods`) |
 
 ### Key Parameters
